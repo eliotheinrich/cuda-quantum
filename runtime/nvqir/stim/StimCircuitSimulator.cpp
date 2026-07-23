@@ -10,6 +10,7 @@
 #include "common/FmtCore.h"
 #include "nvqir/CircuitSimulator.h"
 #include "stim.h"
+#include <cctype>
 #include <cmath>
 #include <numeric>
 
@@ -230,8 +231,9 @@ protected:
   /// Duplicate measurement targets within a single DETECTOR or
   /// OBSERVABLE_INCLUDE instruction are collapsed modulo 2 (GF(2) XOR): an
   /// index that appears an even number of times cancels out.
-  void computeMeasurementMatrices(cudaq::dem_result &result) {
-    auto flat = recordedCircuit.flattened();
+  void computeMeasurementMatrices(cudaq::dem_result &result,
+                                  const stim::Circuit &circuit) {
+    auto flat = circuit.flattened();
     auto stats = flat.compute_stats();
     result.m2d.num_measurements = stats.num_measurements;
     result.m2o.num_measurements = stats.num_measurements;
@@ -295,6 +297,22 @@ protected:
 
   /// @brief Finalize the execution context, ensuring the simulator is left in a
   /// clean state even if finalization throws.
+  /// @brief True if @p circuit contains any measurement-record-controlled
+  /// (feedback) operation, e.g. `CX rec[-k] q`.
+  static bool circuitHasFeedback(const stim::Circuit &circuit) {
+    for (const auto &inst : circuit.operations) {
+      if (inst.gate_type == stim::GateType::REPEAT) {
+        if (circuitHasFeedback(inst.repeat_block_body(circuit)))
+          return true;
+        continue;
+      }
+      for (const auto &t : inst.targets)
+        if (t.is_measurement_record_target())
+          return true;
+    }
+    return false;
+  }
+
   void finalizeExecutionContext(const cudaq::other_policies &policy,
                                 cudaq::ExecutionContext &context) override {
     try {
@@ -311,15 +329,44 @@ protected:
 
     cudaq::dem_result result;
     const auto &options = policy.options;
+
+    // If the recorded circuit contains measurement-conditioned feedback --
+    // record-controlled Paulis emitted by `apply_pauli_feedback` (i.e. the
+    // representation of `if (m) P(q)`) -- fold the feedback into the
+    // detector/observable definitions so BOTH error analysis and the m2d/m2o
+    // matrices account for it. `circuit_with_inlined_feedback` is a no-op on
+    // feedback-free circuits, so existing DEM extraction is unchanged.
+    if (std::getenv("CUDAQ_STIM_DUMP_DEM_CIRCUIT"))
+      fprintf(stderr, "==== recordedCircuit ====\n%s\n", recordedCircuit.str().c_str());
+
+    stim::Circuit circuitForDem;
+    if (circuitHasFeedback(recordedCircuit)) {
+      // `circuit_with_inlined_feedback` runs its own backward pass and can
+      // throw a low-level Stim error (e.g. anticommuting detecting regions)
+      // when the feedback yields non-deterministic detectors. Translate it to
+      // a DEM-level message rather than leaking Stim internals to the user.
+      try {
+        circuitForDem = stim::circuit_with_inlined_feedback(recordedCircuit);
+      } catch (const std::exception &e) {
+        throw std::runtime_error(
+            "`cudaq::dem_from_kernel`: failed to inline measurement-conditioned "
+            "feedback -- the feedback leaves one or more detectors "
+            "non-deterministic. Underlying Stim error: " +
+            std::string(e.what()));
+      }
+    } else {
+      circuitForDem = recordedCircuit;
+    }
+
     result.dem = stim::ErrorAnalyzer::circuit_to_detector_error_model(
-                     recordedCircuit, options.decompose_errors,
+                     circuitForDem, options.decompose_errors,
                      options.fold_loops, options.allow_gauge_detectors,
                      options.approximate_disjoint_errors_threshold,
                      options.ignore_decomposition_failures,
                      options.block_decomposition_from_introducing_remnant_edges)
                      .str();
     if (policy.options.return_measurement_matrices)
-      computeMeasurementMatrices(result);
+      computeMeasurementMatrices(result, circuitForDem);
     return result;
   }
 
@@ -832,6 +879,30 @@ public:
     auto targets = measurementIndicesToRecordTargets(indices, count);
     if (!targets.empty())
       recordedCircuit.safe_append_u("DETECTOR", targets);
+  }
+
+  /// @brief NVQIR entry point for `qec.apply_pauli_feedback`. Records a
+  /// measurement-conditioned Pauli as Stim *symbolic feedback*: emits
+  /// `C{X,Y,Z} rec[-k] qubit`, where k is the lookback to the conditioning
+  /// measurement `measIndex` (its chronological record index). Like
+  /// detector()/logical_observable(), this appends to `recordedCircuit` only --
+  /// the record-controlled op is a Pauli-frame update that the error analyzer
+  /// (via `circuit_with_inlined_feedback` in the DEM finalize path) folds into
+  /// the detector/observable definitions.
+  void applyPauliFeedback(std::int64_t measIndex, char pauli,
+                          std::size_t qubit) override {
+    if (!sampleQubits.empty())
+      flushAnySamplingTasks(/*force=*/false);
+    char p = static_cast<char>(std::toupper(static_cast<unsigned char>(pauli)));
+    if (p != 'X' && p != 'Y' && p != 'Z')
+      throw std::invalid_argument(
+          "apply_pauli_feedback: pauli must be one of X, Y, Z");
+    const std::int64_t idx[1] = {measIndex};
+    auto rec = measurementIndicesToRecordTargets(idx, 1); // [ rec[-k] target ]
+    const std::string gate = std::string("C") + p;        // CX / CY / CZ
+    std::vector<std::uint32_t> targets = {
+        rec[0], static_cast<std::uint32_t>(qubit)};
+    recordedCircuit.safe_append_u(gate, targets);
   }
 
   void logical_observable(const std::int64_t *indices, std::size_t count,

@@ -364,6 +364,24 @@ def detectors(prev, curr):
     raise RuntimeError(_KERNEL_ONLY_ERROR_MESSAGE.format("cudaq.detectors"))
 
 
+def conditioned_pauli_frame_update(measurement, pauli, qubit):
+    """Apply a Pauli-frame update conditioned on a measurement result.
+
+    Within a ``@cudaq.kernel``, emits a ``qec.apply_pauli_feedback`` op that
+    records the Stim instruction ``C{X,Y,Z} rec[-k] qubit`` (where ``k`` is
+    the lookback to ``measurement``).  Unlike ``if measurement: P(qubit)``,
+    this is always representable in a detector error model.
+
+    Args:
+        measurement: a ``cudaq.measure_handle`` (result of ``mz``/``mx``/``my``).
+        pauli: ``'X'``, ``'Y'``, or ``'Z'`` (case-insensitive string literal).
+        qubit: the target qubit.
+    """
+    raise RuntimeError(
+        _KERNEL_ONLY_ERROR_MESSAGE.format(
+            "cudaq.conditioned_pauli_frame_update"))
+
+
 def __clearKernelRegistries():
     global globalRegisteredOperations
     globalRegisteredOperations.clear()

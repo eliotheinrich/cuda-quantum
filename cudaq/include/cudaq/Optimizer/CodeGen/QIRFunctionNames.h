@@ -43,6 +43,8 @@ static constexpr const char QIRCustomAdjOp[] =
 static constexpr const char QIRExpPauli[] = "__quantum__qis__exp_pauli";
 
 static constexpr const char QIRDetector[] = "__quantum__qis__detector";
+static constexpr const char QIRApplyPauliFeedback[] =
+    "__quantum__qis__apply_pauli_feedback";
 static constexpr const char QIRLogicalObservable[] =
     "__quantum__qis__logical_observable";
 static constexpr const char QIRPairDetectors[] =

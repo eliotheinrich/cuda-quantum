@@ -1739,6 +1739,39 @@ class PyASTBridge(ast.NodeVisitor):
         else:
             qec.DetectorOp(values)
 
+    def _lowerConditionedPauliFeedbackOp(self, node):
+        """Lower ``cudaq.conditioned_pauli_frame_update(meas, pauli, qubit)``
+        to a ``qec.apply_pauli_feedback`` op.
+
+        This is a direct, explicit Pauli-frame update: it emits the Stim
+        instruction ``C{X,Y,Z} rec[-k] qubit`` without going through
+        measurement-conditioned control flow.  ``pauli`` must be a string
+        literal ``'X'``, ``'Y'``, or ``'Z'`` (case-insensitive).
+        """
+        if len(node.args) != 3:
+            self.emitFatalError(
+                "cudaq.conditioned_pauli_frame_update requires exactly 3 "
+                "arguments: (measure_handle, pauli, qubit)", node)
+
+        pauli_node = node.args[1]
+        if (not isinstance(pauli_node, ast.Constant) or
+                not isinstance(pauli_node.value, str)):
+            self.emitFatalError(
+                "second argument to cudaq.conditioned_pauli_frame_update "
+                "must be a string literal 'X', 'Y', or 'Z'", node)
+        pauli_str = pauli_node.value.upper()
+        pauli_map = {'X': 0, 'Y': 1, 'Z': 2}
+        if pauli_str not in pauli_map:
+            self.emitFatalError(
+                f"pauli must be 'X', 'Y', or 'Z', got '{pauli_node.value}'",
+                node)
+
+        self.visit(node.args[0])
+        meas_val = self.popValue()
+        self.visit(node.args[2])
+        qubit_val = self.popValue()
+        qec.ApplyPauliFeedbackOp(meas_val, qubit_val, pauli_map[pauli_str])
+
     def _lowerAngularEncode(self, node):
         """Lower ``cudaq.contrib.angular_encode(q, angles, rotation='Y')`` to
         per-qubit ``rx``/``ry``/``rz`` gates."""
@@ -3947,6 +3980,9 @@ class PyASTBridge(ast.NodeVisitor):
                     if node.func.attr in ("detector", "logical_observable",
                                           "detectors"):
                         return self._lowerQECOp(node)
+
+                    if node.func.attr == 'conditioned_pauli_frame_update':
+                        return self._lowerConditionedPauliFeedbackOp(node)
 
                     if node.func.attr == 'adjoint' or node.func.attr == 'control':
                         with trace.span(

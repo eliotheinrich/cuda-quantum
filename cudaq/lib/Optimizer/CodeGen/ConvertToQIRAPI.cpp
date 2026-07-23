@@ -2460,11 +2460,37 @@ struct PairDetectorsOpConversion
 
 } // namespace
 
+// Lower `qec.apply_pauli_feedback m, q {pauli}` to a call to
+// `__quantum__qis__apply_pauli_feedback(Result* m, i32 pauli, Qubit* q)`. The
+// measurement handle converts to an i64 index; cast it to `Result*` so the
+// runtime resolves it via the same path detectors use.
+struct PauliFeedbackOpConversion
+    : public OpConversionPattern<cudaq::qec::ApplyPauliFeedbackOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(cudaq::qec::ApplyPauliFeedbackOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto resultPtrTy =
+        getQIRResultPtrType(getTypeConverter(), rewriter.getContext());
+    Value resultPtr = cudaq::cc::CastOp::create(rewriter, loc, resultPtrTy,
+                                                adaptor.getMeasurement());
+    Value pauli = arith::ConstantIntOp::create(
+        rewriter, loc, static_cast<std::int64_t>(op.getPauli()), 32);
+    rewriter.replaceOpWithNewOp<func::CallOp>(
+        op, TypeRange{}, cudaq::opt::QIRApplyPauliFeedback,
+        ValueRange{resultPtr, pauli, adaptor.getTarget()});
+    return success();
+  }
+};
+
 static void commonQECHandlingPatterns(RewritePatternSet &patterns,
                                       TypeConverter &typeConverter,
                                       MLIRContext *ctx) {
   patterns.insert<DetectorOpConversion, ObservableOpConversion,
-                  PairDetectorsOpConversion>(typeConverter, ctx);
+                  PairDetectorsOpConversion, PauliFeedbackOpConversion>(
+      typeConverter, ctx);
 }
 
 //===----------------------------------------------------------------------===//

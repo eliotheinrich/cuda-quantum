@@ -643,6 +643,25 @@ inline void detectors(const std::vector<measure_result> &prev,
   throw std::runtime_error(detail::kQpuOnlyHostScopeError);
 }
 
+/// @brief Record a Pauli-frame update conditioned on a measurement result.
+///
+/// Within a `__qpu__` kernel the AST bridge lowers this to a
+/// `qec.apply_pauli_feedback` op, which the Stim backend records as the Stim
+/// instruction `C{X,Y,Z} rec[-k] qubit`.  Unlike `if (m) P(q)`, this call is
+/// always representable in a detector error model.
+///
+/// @param m     A `cudaq::measure_result` returned by `mz`/`mx`/`my`.
+/// @param pauli The Pauli to apply: 'X', 'Y', or 'Z' (case-insensitive).
+///              Must be a compile-time constant.
+/// @param q     The target qubit.
+inline void conditioned_pauli_frame_update(measure_result m, char pauli,
+                                           qubit &q) {
+  (void)m;
+  (void)pauli;
+  (void)q;
+  throw std::runtime_error(detail::kQpuOnlyHostScopeError);
+}
+
 #endif // !CUDAQ_LIBRARY_MODE
 
 // This concept tests if `Kernel` is a `Callable` that takes the arguments,

@@ -7,6 +7,7 @@
  ******************************************************************************/
 
 #include "kernel_builder.h"
+#include <cctype>
 #include "common/Environment.h"
 #include "common/FmtCore.h"
 #include "cudaq_internal/compiler/RuntimeMLIR.h"
@@ -866,6 +867,19 @@ void logical_observable(ImplicitLocOpBuilder &builder,
 void detectors(ImplicitLocOpBuilder &builder, QuakeValue &prev,
                QuakeValue &curr) {
   cudaq::qec::DetectorsOp::create(builder, prev.getValue(), curr.getValue());
+}
+
+void conditioned_pauli_frame_update(ImplicitLocOpBuilder &builder,
+                                    QuakeValue &measurement, char pauli,
+                                    QuakeValue &qubit) {
+  char p = static_cast<char>(std::toupper(static_cast<unsigned char>(pauli)));
+  if (p != 'X' && p != 'Y' && p != 'Z')
+    throw std::runtime_error(
+        "conditioned_pauli_frame_update: pauli must be 'X', 'Y', or 'Z'");
+  std::int32_t pauliInt = p == 'X' ? 0 : p == 'Y' ? 1 : 2;
+  auto pauliAttr = builder.getI32IntegerAttr(pauliInt);
+  cudaq::qec::ApplyPauliFeedbackOp::create(builder, measurement.getValue(),
+                                           qubit.getValue(), pauliAttr);
 }
 
 void reset(ImplicitLocOpBuilder &builder, const QuakeValue &qubitOrQvec) {

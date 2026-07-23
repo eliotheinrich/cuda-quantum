@@ -7,6 +7,7 @@
  ******************************************************************************/
 
 #include "cudaq/Frontend/nvqpp/ASTBridge.h"
+#include <cctype>
 #include "cudaq/Frontend/nvqpp/QisBuilder.h"
 #include "cudaq/Optimizer/Builder/Factory.h"
 #include "cudaq/Optimizer/Builder/Intrinsics.h"
@@ -2762,6 +2763,40 @@ bool QuakeBridgeVisitor::VisitCallExpr(clang::CallExpr *x) {
       Value prev = loadHandleVectorIfPointer(builder, loc, args[0]);
       Value curr = loadHandleVectorIfPointer(builder, loc, args[1]);
       qec::DetectorsOp::create(builder, loc, prev, curr);
+      return true;
+    }
+
+    if (funcName == "conditioned_pauli_frame_update" && inCudaqDirect) {
+      if (args.size() != 3) {
+        reportClangError(x, mangler,
+                         "`cudaq::conditioned_pauli_frame_update` takes "
+                         "exactly 3 arguments: (measure_result, char, qubit)");
+        return false;
+      }
+      // arg[1] must be a compile-time constant char ('X', 'Y', or 'Z')
+      const auto *pauliExpr = x->getArg(1);
+      auto evaluated = pauliExpr->getIntegerConstantExpr(*astContext);
+      if (!evaluated) {
+        reportClangError(
+            x, mangler,
+            "`cudaq::conditioned_pauli_frame_update` requires a compile-time "
+            "constant pauli character ('X', 'Y', or 'Z')");
+        return false;
+      }
+      char pauliChar = static_cast<char>(
+          std::toupper(static_cast<unsigned char>(evaluated->getSExtValue())));
+      if (pauliChar != 'X' && pauliChar != 'Y' && pauliChar != 'Z') {
+        reportClangError(x, mangler,
+                         "`cudaq::conditioned_pauli_frame_update` pauli must "
+                         "be 'X', 'Y', or 'Z'");
+        return false;
+      }
+      std::int32_t pauliInt = pauliChar == 'X' ? 0 : pauliChar == 'Y' ? 1 : 2;
+      Value meas = loadHandleIfPointer(builder, loc, args[0]);
+      Value qubitVal = args[2];
+      auto pauliAttr = builder.getI32IntegerAttr(pauliInt);
+      qec::ApplyPauliFeedbackOp::create(builder, loc, meas, qubitVal,
+                                        pauliAttr);
       return true;
     }
 

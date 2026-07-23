@@ -535,6 +535,12 @@ public:
   /// simulator. Default no-op; QEC-capable backends override.
   virtual void detector(const std::int64_t *indices, std::size_t count) {}
 
+  /// @brief Apply Pauli @p pauli ('X'/'Y'/'Z') to @p qubit conditioned on the
+  /// measurement whose chronological record index is @p measIndex (symbolic
+  /// Pauli-frame feedback). Default no-op; QEC-capable backends override.
+  virtual void applyPauliFeedback(std::int64_t measIndex, char pauli,
+                                  std::size_t qubit) {}
+
   /// @brief Declare a `qec.logical_observable` over one or more prior
   /// measurements, tagged with @p observable_index. Default no-op; QEC-capable
   /// backends override.

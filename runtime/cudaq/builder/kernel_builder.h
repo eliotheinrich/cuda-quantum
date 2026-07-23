@@ -238,6 +238,13 @@ void logical_observable(mlir::ImplicitLocOpBuilder &builder,
 void detectors(mlir::ImplicitLocOpBuilder &builder, QuakeValue &prev,
                QuakeValue &curr);
 
+/// @brief Record a Pauli-frame update conditioned on a measurement result.
+/// Emits ``qec.apply_pauli_feedback meas, qubit {pauli}`` where
+/// ``pauli`` is 0=X, 1=Y, 2=Z (from the character 'X'/'Y'/'Z').
+void conditioned_pauli_frame_update(mlir::ImplicitLocOpBuilder &builder,
+                                    QuakeValue &measurement, char pauli,
+                                    QuakeValue &qubit);
+
 void exp_pauli(mlir::ImplicitLocOpBuilder &builder, const QuakeValue &theta,
                const std::vector<QuakeValue> &qubits,
                const std::string &pauliWord);
@@ -724,6 +731,22 @@ public:
   /// arguments must be handle-list `QuakeValue`s.
   void detectors(QuakeValue prev, QuakeValue curr) {
     detail::detectors(*opBuilder, prev, curr);
+  }
+
+  /// @brief Record a Pauli-frame update conditioned on a measurement.
+  ///
+  /// Emits a ``qec.apply_pauli_feedback`` op that the Stim backend
+  /// records as ``C{X,Y,Z} rec[-k] qubit`` where ``k`` is the lookback
+  /// to ``measurement``.  Unlike ``if (m) P(q)``, this is always
+  /// representable in a detector error model.
+  ///
+  /// @param measurement A scalar measure handle (result of ``mz``/``mx``/``my``).
+  /// @param pauli       The Pauli to apply: 'X', 'Y', or 'Z' (case-insensitive).
+  /// @param qubit       The target qubit.
+  void conditioned_pauli_frame_update(QuakeValue measurement, char pauli,
+                                      QuakeValue qubit) {
+    detail::conditioned_pauli_frame_update(*opBuilder, measurement, pauli,
+                                          qubit);
   }
 
   /// @brief SWAP operation for swapping the quantum states of two qubits.

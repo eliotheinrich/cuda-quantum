@@ -70,4 +70,23 @@ def QEC_ObservableOp : QECOp<"observable"> {
   }];
 }
 
+def QEC_ApplyPauliFeedbackOp : QECOp<"apply_pauli_feedback"> {
+  let summary = "Apply a Pauli to a qubit conditioned on a measurement.";
+  let description = [{
+    Symbolic (Pauli-frame) feedback: applies Pauli `pauli` (0=X, 1=Y, 2=Z) to
+    `target`, conditioned on the result of `measurement`. Recorded so it can be
+    represented in a detector error model as Stim feedback `C{X,Y,Z} rec[-k] q`,
+    which Stim's `circuit_with_inlined_feedback` folds into the detector /
+    observable definitions on the `dem_from_kernel` path. A side-effecting op.
+  }];
+  let arguments = (ins
+    cc_MeasureHandleType:$measurement,
+    AnyType:$target,
+    I32Attr:$pauli
+  );
+  let assemblyFormat = [{
+    $measurement `,` $target `:` type($measurement) `,` type($target) attr-dict
+  }];
+}
+
 #endif // CUDAQ_OPTIMIZER_DIALECT_QEC_OPS
