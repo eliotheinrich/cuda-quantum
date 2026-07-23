@@ -9,7 +9,6 @@
 from cudaq.mlir._mlir_libs._quakeDialects import cudaq_runtime
 from cudaq.kernel.kernel_decorator import (mk_decorator, isa_kernel_decorator)
 from cudaq.util import trace
-from .utils import _kernel_has_conditionals_on_measure
 
 _VALID_DEM_OPTION_KEYS = frozenset({
     "decompose_errors",
@@ -20,13 +19,6 @@ _VALID_DEM_OPTION_KEYS = frozenset({
     "block_decomposition_from_introducing_remnant_edges",
     "return_measurement_matrices",
 })
-
-
-def _detail_check_conditionals_on_measure(kernel):
-    # Measurement-conditioned Paulis (`if (m) P(q)`) are lowered to symbolic
-    # feedback (`qec.apply_pauli_feedback`) on the DEM path, so they are
-    # representable in the detector error model. No longer rejected here.
-    return
 
 
 @trace.traced
@@ -78,8 +70,6 @@ def dem_from_kernel(kernel, *args, noise_model=None, **dem_kwargs):
       ``m2o[k, m] == 1`` means measurement ``m`` contributes to observable ``k``.
       Measurement indices are chronological.
     """
-    _detail_check_conditionals_on_measure(kernel)
-
     unknown = set(dem_kwargs) - _VALID_DEM_OPTION_KEYS
     if unknown:
         raise ValueError(

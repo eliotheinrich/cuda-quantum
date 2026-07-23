@@ -15,6 +15,7 @@
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/SmallVector.h"
 #include <functional>
+#include <utility>
 
 namespace cudaq::opt {
 #define GEN_PASS_DEF_LOWERPAULIFEEDBACK
@@ -131,7 +132,7 @@ struct LowerPauliFeedbackPass
       // targets. Any impure non-Pauli op (a non-Pauli gate, a controlled gate,
       // a nested feedback op, ...) disqualifies the whole `if`, which is then
       // rejected downstream rather than silently mis-lowered.
-      SmallVector<cudaq::quake::OperatorInterface> gates;
+      SmallVector<std::pair<cudaq::quake::OperatorInterface, int32_t>> gates;
       bool ok = true;
       for (Operation &o : blk.without_terminator()) {
         auto g = dyn_cast<cudaq::quake::OperatorInterface>(&o);
@@ -142,13 +143,14 @@ struct LowerPauliFeedbackPass
           }
           continue; // pure non-gate op (e.g. extract_ref)
         }
-        if (!pauliCode(g.getOperation()) || g.getControls().size() != 0 ||
+        auto code = pauliCode(g.getOperation());
+        if (!code || g.getControls().size() != 0 ||
             g.getTargets().size() != 1 ||
             !isa<cudaq::quake::RefType>(g.getTargets()[0].getType())) {
           ok = false;
           break;
         }
-        gates.push_back(g);
+        gates.push_back({g, *code});
       }
       if (!ok || gates.empty())
         continue;
@@ -176,8 +178,8 @@ struct LowerPauliFeedbackPass
         def->moveBefore(ifOp);
         return true;
       };
-      for (auto g : gates)
-        if (!hoist(g.getTargets()[0].getDefiningOp())) {
+      for (auto &gc : gates)
+        if (!hoist(gc.first.getTargets()[0].getDefiningOp())) {
           ok = false;
           break;
         }
@@ -191,9 +193,9 @@ struct LowerPauliFeedbackPass
       // These all act with the same single-qubit Pauli, so they commute and
       // their order is irrelevant; distinct gates keep program order.
       OpBuilder builder(ifOp);
-      for (auto g : gates) {
+      for (auto &[g, code] : gates) {
         Value target = g.getTargets()[0];
-        auto pauliAttr = builder.getI32IntegerAttr(*pauliCode(g.getOperation()));
+        auto pauliAttr = builder.getI32IntegerAttr(code);
         if (parity)
           builder.clone(*g.getOperation()); // unconditional Pauli (the `c` term)
         for (Value h : handles)

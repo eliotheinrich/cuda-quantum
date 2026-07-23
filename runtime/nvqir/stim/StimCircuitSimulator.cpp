@@ -336,14 +336,17 @@ protected:
     // detector/observable definitions so BOTH error analysis and the m2d/m2o
     // matrices account for it. `circuit_with_inlined_feedback` is a no-op on
     // feedback-free circuits, so existing DEM extraction is unchanged.
-    stim::Circuit circuitForDem;
+    // Feedback-free circuits (all pre-existing DEM usage) are analyzed in
+    // place; only when feedback is present do we materialize an inlined copy.
+    const stim::Circuit *circuitForDem = &recordedCircuit;
+    stim::Circuit inlined;
     if (circuitHasFeedback(recordedCircuit)) {
       // `circuit_with_inlined_feedback` runs its own backward pass and can
       // throw a low-level Stim error (e.g. anticommuting detecting regions)
       // when the feedback yields non-deterministic detectors. Translate it to
       // a DEM-level message rather than leaking Stim internals to the user.
       try {
-        circuitForDem = stim::circuit_with_inlined_feedback(recordedCircuit);
+        inlined = stim::circuit_with_inlined_feedback(recordedCircuit);
       } catch (const std::exception &e) {
         throw std::runtime_error(
             "`cudaq::dem_from_kernel`: failed to inline measurement-conditioned "
@@ -351,19 +354,18 @@ protected:
             "non-deterministic. Underlying Stim error: " +
             std::string(e.what()));
       }
-    } else {
-      circuitForDem = recordedCircuit;
+      circuitForDem = &inlined;
     }
 
     result.dem = stim::ErrorAnalyzer::circuit_to_detector_error_model(
-                     circuitForDem, options.decompose_errors,
+                     *circuitForDem, options.decompose_errors,
                      options.fold_loops, options.allow_gauge_detectors,
                      options.approximate_disjoint_errors_threshold,
                      options.ignore_decomposition_failures,
                      options.block_decomposition_from_introducing_remnant_edges)
                      .str();
     if (policy.options.return_measurement_matrices)
-      computeMeasurementMatrices(result, circuitForDem);
+      computeMeasurementMatrices(result, *circuitForDem);
     return result;
   }
 
@@ -985,37 +987,4 @@ public:
 #ifndef __NVQIR_QPP_TOGGLE_CREATE
 /// Register this Simulator with NVQIR.
 NVQIR_REGISTER_SIMULATOR(nvqir::StimCircuitSimulator, stim)
-
-// ---------------------------------------------------------------------------
-// Measurement-conditioned feedback entry points.
-//
-// These let a kernel express `if (m) P(q)` as symbolic Stim feedback so it can
-// be represented in Stim's error analyzer (`dem_from_kernel`). They live in the
-// stim backend .so and route to the active `StimCircuitSimulator` via the
-// registered `getCircuitSimulator()` accessor -- no base-class ABI change.
-extern "C" {
-
-/// @brief Chronological record index of the most recent measurement (the value
-/// to pass as `measIndex` to `__nvqir__apply_pauli_feedback`). Returns the same
-/// index the QEC detector/observable lowering uses.
-std::int64_t __nvqir__last_measure_index() {
-  auto *sim = getCircuitSimulator();
-  return sim->getMeasureIndex();
-}
-
-/// @brief Apply Pauli `pauli` ('X'/'Y'/'Z') to `qubit`, conditioned on the
-/// measurement whose chronological record index is `measIndex`. Recorded as
-/// `C{pauli} rec[-k] qubit` so it is representable in Stim's error analyzer.
-void __nvqir__apply_pauli_feedback(std::int64_t measIndex, char pauli,
-                                   std::uint64_t qubit) {
-  auto *sim = getCircuitSimulator();
-  auto *stimSim = dynamic_cast<nvqir::StimCircuitSimulator *>(sim);
-  if (!stimSim)
-    throw std::runtime_error(
-        "apply_pauli_feedback requires the stim backend (--target=stim / "
-        "dem_from_kernel).");
-  stimSim->recordPauliFeedback(measIndex, pauli,
-                               static_cast<std::size_t>(qubit));
-}
-}
 #endif

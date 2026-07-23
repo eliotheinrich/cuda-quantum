@@ -351,15 +351,13 @@ static bool conditionUsesMeasurement(mlir::Value cond) {
 /// `qec.apply_pauli_feedback` ops (or feedback + reset), so it only rejects
 /// genuinely un-representable conditionals.
 static bool hasUnloweredMeasurementBranch(mlir::ModuleOp moduleOp) {
-  bool found = false;
-  moduleOp.walk([&](cudaq::cc::IfOp ifOp) {
-    if (conditionUsesMeasurement(ifOp.getCondition())) {
-      found = true;
-      return mlir::WalkResult::interrupt();
-    }
-    return mlir::WalkResult::advance();
-  });
-  return found;
+  return moduleOp
+      .walk([](cudaq::cc::IfOp ifOp) {
+        return conditionUsesMeasurement(ifOp.getCondition())
+                   ? mlir::WalkResult::interrupt()
+                   : mlir::WalkResult::advance();
+      })
+      .wasInterrupted();
 }
 
 std::pair<bool, std::string>
