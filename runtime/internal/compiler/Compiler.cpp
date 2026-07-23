@@ -21,7 +21,9 @@
 #include "nlohmann/json.hpp"
 #include "cudaq/Optimizer/Builder/Runtime.h"
 #include "cudaq/Optimizer/CodeGen/QIRAttributeNames.h"
+#include "cudaq/Optimizer/Dialect/CC/CCOps.h"
 #include "cudaq/Optimizer/Dialect/Quake/QuakeInterfaces.h"
+#include "cudaq/Optimizer/Dialect/Quake/QuakeOps.h"
 #include "cudaq/Optimizer/Transforms/AddMetadata.h"
 #include "cudaq/Optimizer/Transforms/Passes.h"
 #include "cudaq/runtime/logger/logger.h"
@@ -316,10 +318,88 @@ cudaq_internal::compiler::Compiler::prepareModule(const std::string &kernelName,
   return {moduleOp, epFunc, isFullySpecialized};
 }
 
+/// @brief True if @p cond depends, transitively, on a `quake.discriminate`
+/// (i.e. on a measurement result). Follows SSA operands and peels the
+/// `cc.store`/`cc.load` chain the frontend emits for a `measure_result`
+/// variable.
+static bool conditionUsesMeasurement(mlir::Value cond) {
+  llvm::SmallVector<mlir::Value, 16> worklist{cond};
+  llvm::SmallPtrSet<mlir::Operation *, 16> visited;
+  while (!worklist.empty()) {
+    auto *def = worklist.pop_back_val().getDefiningOp();
+    if (!def || !visited.insert(def).second)
+      continue;
+    if (isa<cudaq::quake::DiscriminateOp>(def))
+      return true;
+    if (auto load = dyn_cast<cudaq::cc::LoadOp>(def)) {
+      // Follow the value(s) stored into the loaded pointer.
+      for (auto *user : load.getPtrvalue().getUsers())
+        if (auto st = dyn_cast<cudaq::cc::StoreOp>(user))
+          worklist.push_back(st.getValue());
+      continue;
+    }
+    for (mlir::Value operand : def->getOperands())
+      worklist.push_back(operand);
+  }
+  return false;
+}
+
+/// @brief True if any `cc.if` remains whose condition is derived from a
+/// measurement result -- i.e. a measurement-conditioned branch the
+/// `lower-pauli-feedback` pass could not turn into symbolic feedback. Unlike
+/// the coarse `hasConditionalsOnMeasureResults`, this does not flag the lowered
+/// `qec.apply_pauli_feedback` ops (or feedback + reset), so it only rejects
+/// genuinely un-representable conditionals.
+static bool hasUnloweredMeasurementBranch(mlir::ModuleOp moduleOp) {
+  bool found = false;
+  moduleOp.walk([&](cudaq::cc::IfOp ifOp) {
+    if (conditionUsesMeasurement(ifOp.getCondition())) {
+      found = true;
+      return mlir::WalkResult::interrupt();
+    }
+    return mlir::WalkResult::advance();
+  });
+  return found;
+}
+
 std::pair<bool, std::string>
 cudaq_internal::compiler::Compiler::executeMainPipeline(
     mlir::ModuleOp moduleOp, const std::string &kernelName) {
   if (target->pipelineConfig.skipTargetLoweringPipeline) {
+    // DEM extraction path (only). Lower measurement-conditioned Paulis --
+    // `if (m) P(q)` -> `qec.apply_pauli_feedback` -- so they are representable
+    // as Stim symbolic feedback in the extracted detector error model instead
+    // of collapsing to a concrete measurement branch. No-op when the kernel
+    // has no such conditional; never runs for any non-DEM path.
+    mlir::PassManager pm(moduleOp.getContext());
+    // Flatten classical control flow first (constant-fold, unroll constant-trip
+    // loops, simplify conditionals) so a loop nested inside a
+    // measurement-conditioned branch (`if (m) { for ...: P q }`) becomes
+    // individual Pauli gates that `lower-pauli-feedback` can turn into feedback.
+    // Loops that cannot be fully unrolled (e.g. a non-constant trip count) are
+    // left rolled; any branch that remains measurement-conditioned is rejected
+    // below.
+    cudaq::opt::createClassicalOptimizationPipeline(pm);
+    pm.addNestedPass<mlir::func::FuncOp>(
+        cudaq::opt::createLowerPauliFeedback());
+    if (mlir::failed(cudaq_internal::compiler::runPassManager(pm, moduleOp)))
+      return {false, ""};
+    // Any measurement-conditioned branch the pass could not lower to symbolic
+    // feedback would otherwise be executed as a concrete branch during DEM
+    // analysis -- baking in one random measurement outcome and yielding a
+    // silently incorrect detector error model. Reject such kernels explicitly.
+    if (hasUnloweredMeasurementBranch(moduleOp))
+      throw std::runtime_error(
+          "`cudaq::dem_from_kernel`: kernel '" + kernelName +
+          "' contains a measurement-conditioned operation that cannot be "
+          "represented as symbolic Pauli feedback. Stim feedback is a linear "
+          "(GF(2)) frame update, so the condition must be an affine function of "
+          "measurement results -- `if (m)`, `if (not m)`, `if (m0 xor m1)`, "
+          "... -- guarding a body of one or more single-qubit X/Y/Z gates (no "
+          "controls, no else-branch). Non-linear conditions (`and`/`or`, which "
+          "carry an `m0*m1` product term) and non-Pauli or controlled gates "
+          "have no feedback representation. DEM extraction aborted to avoid a "
+          "silently incorrect result.");
     return {false, ""};
   }
   auto passPipelineConfig = getPassPipeline(*target);

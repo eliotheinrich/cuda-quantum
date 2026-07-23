@@ -32,6 +32,18 @@ public:
 
   void resetToZero() { setToZeroState(); }
 
+  /// @brief Expose protected methods for testing.
+  using nvqir::StimCircuitSimulator::applyNoise;
+
+  /// @brief Convenience wrapper around the DEM finalize path. Uses a
+  /// disjoint-error threshold of 1.0 so approximate disjoint-error products are
+  /// accepted (matching the `stimDem` ground-truth helper below).
+  std::string generateDem() {
+    cudaq::dem_policy policy;
+    policy.options.approximate_disjoint_errors_threshold = 1.0;
+    return finalizeExecutionContext(policy).dem;
+  }
+
   /// @brief Render `recordedCircuit` as a Stim-format string for inspection
   /// from the test body.
   std::string recordedCircuitText() const {
@@ -202,6 +214,204 @@ CUDAQ_TEST(StimQECTester, PairDetectorsAdapterRejectsSizeMismatch) {
   Result *prev[1] = {measureIndexAsResultPtr(0)};
   Result *curr[2] = {measureIndexAsResultPtr(1), measureIndexAsResultPtr(2)};
   EXPECT_ANY_THROW(__quantum__qis__pair_detectors(prev, 1, curr, 2));
+}
+
+// ---------------------------------------------------------------------------
+// Measurement-conditioned Pauli feedback: `if (m) P(q)` recorded as symbolic
+// Stim feedback `C{X,Y,Z} rec[-k] q` (recordPauliFeedback + generateDem).
+// ---------------------------------------------------------------------------
+
+CUDAQ_TEST(StimQECTester, PauliFeedbackEmitsRecordControlledOp) {
+  StimCircuitSimulatorTester sim;
+  sim.setRandomSeed(42);
+  auto q0 = sim.allocateQubit();
+  auto q1 = sim.allocateQubit();
+  sim.mz(q0); // chronological measurement index 0 (num_measurements = 1)
+
+  // X -> CX, Z -> CZ; pauli is case-insensitive; lookback is rec[-1].
+  sim.recordPauliFeedback(/*measIndex=*/0, 'X', q1);
+  sim.recordPauliFeedback(/*measIndex=*/0, 'z', q1); // lowercase accepted
+
+  const auto text = sim.recordedCircuitText();
+  EXPECT_NE(text.find("CX rec[-1] " + std::to_string(q1)), std::string::npos)
+      << text;
+  EXPECT_NE(text.find("CZ rec[-1] " + std::to_string(q1)), std::string::npos)
+      << text;
+}
+
+CUDAQ_TEST(StimQECTester, PauliFeedbackLookbackIsChronological) {
+  StimCircuitSimulatorTester sim;
+  sim.setRandomSeed(42);
+  auto q0 = sim.allocateQubit();
+  auto q1 = sim.allocateQubit();
+  sim.mz(q0); // index 0
+  sim.mz(q1); // index 1 (num_measurements = 2)
+
+  // Conditioned on the FIRST measurement (index 0) -> lookback rec[-2].
+  sim.recordPauliFeedback(/*measIndex=*/0, 'Y', q1);
+  EXPECT_NE(sim.recordedCircuitText().find("CY rec[-2] " + std::to_string(q1)),
+            std::string::npos)
+      << sim.recordedCircuitText();
+}
+
+CUDAQ_TEST(StimQECTester, PauliFeedbackRejectsInvalidPauli) {
+  StimCircuitSimulatorTester sim;
+  auto q0 = sim.allocateQubit();
+  sim.mz(q0);
+  EXPECT_THROW(sim.recordPauliFeedback(0, 'H', q0), std::invalid_argument);
+}
+
+CUDAQ_TEST(StimQECTester, PauliFeedbackRejectsOutOfRangeIndex) {
+  StimCircuitSimulatorTester sim;
+  auto q0 = sim.allocateQubit();
+  sim.mz(q0); // num_measurements = 1
+  EXPECT_THROW(sim.recordPauliFeedback(/*measIndex=*/5, 'X', q0),
+               std::out_of_range);
+}
+
+// Shared circuit: prepare |+>, measure (random), optionally feedback-correct
+// back to |0>, bit-flip error, remeasure, detector on the second measurement.
+static void buildFeedbackMemoryCircuit(StimCircuitSimulatorTester &sim,
+                                       bool withFeedback) {
+  auto q0 = sim.allocateQubit();
+  sim.applyNamedGate("H", {}, {q0});
+  sim.mz(q0); // index 0
+  if (withFeedback)
+    sim.recordPauliFeedback(/*measIndex=*/0, 'X', q0); // CX rec[-1] 0
+  cudaq::kraus_channel xerr;
+  xerr.noise_type = cudaq::noise_model_type::x_error;
+  xerr.parameters = {0.1};
+  sim.applyNoise(xerr, std::vector<std::size_t>{q0});
+  sim.mz(q0); // index 1
+  const std::int64_t det[] = {1};
+  sim.detector(det, 1);
+}
+
+// With feedback, the detector is deterministic (once the frame update is
+// folded in) and error analysis yields a valid DEM.
+CUDAQ_TEST(StimQECTester, PauliFeedbackYieldsValidDem) {
+  StimCircuitSimulatorTester sim;
+  sim.setRandomSeed(42);
+  buildFeedbackMemoryCircuit(sim, /*withFeedback=*/true);
+  EXPECT_NE(sim.recordedCircuitText().find("CX rec[-1] 0"), std::string::npos)
+      << sim.recordedCircuitText();
+  const std::string dem = sim.generateDem();
+  EXPECT_NE(dem.find("error("), std::string::npos) << dem;
+  EXPECT_NE(dem.find("D0"), std::string::npos) << dem;
+}
+
+// Without the feedback op (the concrete branch a naive lowering records), the
+// second measurement depends on the random first outcome, leaving a
+// non-deterministic detector that Stim's error analyzer rejects.
+CUDAQ_TEST(StimQECTester, MissingFeedbackLeavesNonDeterministicDetector) {
+  StimCircuitSimulatorTester sim;
+  sim.setRandomSeed(42);
+  buildFeedbackMemoryCircuit(sim, /*withFeedback=*/false);
+  EXPECT_ANY_THROW(sim.generateDem());
+}
+
+// Ground-truth helper: Stim's own analysis of a circuit text -> DEM string,
+// with the same options generateDem() uses.
+static std::string stimDem(const std::string &circuitText) {
+  stim::Circuit c(circuitText.c_str());
+  auto dem = stim::ErrorAnalyzer::circuit_to_detector_error_model(
+      c, /*decompose_errors=*/false, /*fold_loops=*/true,
+      /*allow_gauge_detectors=*/false,
+      /*approximate_disjoint_errors_threshold=*/1.0,
+      /*ignore_decomposition_failures=*/false,
+      /*block_decomposition_from_introducing_remnant_edges=*/false);
+  return dem.str();
+}
+
+// `if (res[0]) z(3)`-style: the fed-back Pauli and qubit differ from the
+// measured qubit, and the conditioning measurement is the earliest of several.
+CUDAQ_TEST(StimQECTester, FeedbackDifferentPauliAndQubit) {
+  StimCircuitSimulatorTester sim;
+  sim.setRandomSeed(42);
+  auto q0 = sim.allocateQubit();
+  auto q1 = sim.allocateQubit();
+  auto q2 = sim.allocateQubit();
+  auto q3 = sim.allocateQubit();
+  sim.mz(q0);
+  sim.mz(q1);
+  sim.mz(q2); // num_measurements = 3
+  sim.recordPauliFeedback(/*measIndex=*/0, 'Z', q3); // if(res[0]) z(3)
+  EXPECT_NE(sim.recordedCircuitText().find("CZ rec[-3] " + std::to_string(q3)),
+            std::string::npos)
+      << sim.recordedCircuitText();
+}
+
+// Interleave measurements and feedback: each op's lookback is relative to its
+// own position in the record (order matters).
+CUDAQ_TEST(StimQECTester, FeedbackInterleavedLookbacks) {
+  StimCircuitSimulatorTester sim;
+  sim.setRandomSeed(42);
+  auto q0 = sim.allocateQubit();
+  auto q1 = sim.allocateQubit();
+  sim.mz(q0);                          // index 0 (num_measurements = 1)
+  sim.recordPauliFeedback(0, 'X', q1); // -> rec[-1]
+  sim.mz(q1);                          // index 1 (num_measurements = 2)
+  sim.recordPauliFeedback(0, 'X', q0); // idx 0 is now 2 back -> rec[-2]
+  sim.recordPauliFeedback(1, 'Z', q0); // idx 1 -> rec[-1]
+  const auto t = sim.recordedCircuitText();
+  EXPECT_NE(t.find("CX rec[-1] " + std::to_string(q1)), std::string::npos) << t;
+  EXPECT_NE(t.find("CX rec[-2] " + std::to_string(q0)), std::string::npos) << t;
+  EXPECT_NE(t.find("CZ rec[-1] " + std::to_string(q0)), std::string::npos) << t;
+}
+
+// Exact DEM ground truth: the recorded feedback circuit must analyze to the
+// same DEM Stim produces for the intended circuit.
+CUDAQ_TEST(StimQECTester, FeedbackDemMatchesStimGroundTruth) {
+  StimCircuitSimulatorTester sim;
+  sim.setRandomSeed(42);
+  buildFeedbackMemoryCircuit(sim, /*withFeedback=*/true);
+  const std::string got = sim.generateDem();
+  const std::string expected = stimDem(
+      "H 0\nM 0\nCX rec[-1] 0\nX_ERROR(0.1) 0\nM 0\nDETECTOR rec[-1]\n");
+  EXPECT_EQ(got, expected) << "got:\n" << got << "\nexpected:\n" << expected;
+}
+
+// Chained feedback across rounds (feedback -> measure -> feedback) with a
+// detector deterministic under the composed frame update.
+CUDAQ_TEST(StimQECTester, ChainedFeedbackMatchesStimGroundTruth) {
+  StimCircuitSimulatorTester sim;
+  sim.setRandomSeed(42);
+  auto q0 = sim.allocateQubit();
+  sim.applyNamedGate("H", {}, {q0});
+  sim.mz(q0);                          // index 0 (random)
+  sim.recordPauliFeedback(0, 'X', q0); // -> |0>
+  sim.mz(q0);                          // index 1 (deterministic)
+  sim.recordPauliFeedback(1, 'X', q0); // idx 1 -> rec[-1]
+  cudaq::kraus_channel xerr;
+  xerr.noise_type = cudaq::noise_model_type::x_error;
+  xerr.parameters = {0.1};
+  sim.applyNoise(xerr, std::vector<std::size_t>{q0});
+  sim.mz(q0); // index 2
+  const std::int64_t det[] = {2};
+  sim.detector(det, 1);
+  const std::string got = sim.generateDem();
+  const std::string expected =
+      stimDem("H 0\nM 0\nCX rec[-1] 0\nM 0\nCX rec[-1] 0\nX_ERROR(0.1) 0\nM 0\n"
+              "DETECTOR rec[-1]\n");
+  EXPECT_EQ(got, expected) << got;
+}
+
+// The user's `if(m0) x(1)` + DETECTOR(m1,m2): under the frame update the
+// detector equals the random m0, so it is genuinely non-deterministic and MUST
+// be rejected -- the feature must not silently accept an ill-defined detector.
+CUDAQ_TEST(StimQECTester, NonDeterministicUnderFrameRejected) {
+  StimCircuitSimulatorTester sim;
+  sim.setRandomSeed(42);
+  auto q0 = sim.allocateQubit();
+  auto q1 = sim.allocateQubit();
+  sim.applyNamedGate("H", {}, {q0});
+  sim.mz(q0);                          // index 0 (random)
+  sim.mz(q1);                          // index 1 (|0> -> 0)
+  sim.recordPauliFeedback(0, 'X', q1); // q1 ^= m0
+  sim.mz(q1);                          // index 2  (= m0)
+  const std::int64_t det[] = {1, 2};   // m1 XOR m2 = m0 -> non-deterministic
+  sim.detector(det, 2);
+  EXPECT_ANY_THROW(sim.generateDem());
 }
 
 CUDAQ_TEST(StimQECTester, AdapterRejectsNegativeCount) {

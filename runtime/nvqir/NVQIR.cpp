@@ -837,6 +837,17 @@ void __quantum__qis__detector(Result **results, std::int64_t count) {
   nvqir::getCircuitSimulatorInternal()->detector(indices.data(),
                                                  indices.size());
 }
+void __quantum__qis__apply_pauli_feedback(Result *m, std::int32_t pauli,
+                                          Qubit *q) {
+  if (pauli < 0 || pauli > 2)
+    throw std::invalid_argument(
+        std::string("QEC: `apply_pauli_feedback` pauli must be 0(X),1(Y),2(Z), "
+                    "got ") +
+        std::to_string(pauli));
+  static constexpr char paulis[3] = {'X', 'Y', 'Z'};
+  nvqir::getCircuitSimulatorInternal()->applyPauliFeedback(
+      resultPtrToMeasureIndex(m), paulis[pauli], qubitToSizeT(q));
+}
 
 void __quantum__qis__logical_observable(Result **results, std::int64_t count,
                                         std::int64_t observable_index) {

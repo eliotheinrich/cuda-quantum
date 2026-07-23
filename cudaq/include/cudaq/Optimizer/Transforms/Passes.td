@@ -1253,6 +1253,20 @@ def QuakeAddMetadata : Pass<"quake-add-metadata", "mlir::func::FuncOp"> {
   let constructor = "cudaq::opt::createQuakeAddMetadata()";
 }
 
+def LowerPauliFeedback : Pass<"lower-pauli-feedback", "mlir::func::FuncOp"> {
+  let summary = "Lower measurement-conditioned Paulis to symbolic feedback.";
+  let description = [{
+    Rewrites a measurement-conditioned Pauli -- `cc.if(discriminate(mz)) { P q }`
+    where the then-region is a single Pauli gate (X/Y/Z) on one target with no
+    controls -- into a `qec.apply_pauli_feedback` op. This lets the conditional
+    be represented as Stim symbolic feedback (`C{X,Y,Z} rec[-k] q`) so a
+    detector error model can be extracted, instead of recording a concrete
+    branch. Intended for the stim DEM-extraction path only.
+  }];
+  let constructor = "cudaq::opt::createLowerPauliFeedback()";
+  let dependentDialects = ["cudaq::qec::QECDialect"];
+}
+
 def QuakePropagateMetadata :
     Pass<"quake-propagate-metadata", "mlir::ModuleOp"> {
   let summary = "Propagate metadata from callees to callers when needed.";

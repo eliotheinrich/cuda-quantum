@@ -259,7 +259,10 @@ def test_dem_and_run():
     assert all(False == r for r in results)
 
 
-def test_conditional_feedback_rejected():
+def test_conditional_pauli_feedback_lowered():
+    """A measurement-conditioned single-qubit Pauli -- `if (m) P(q)` -- is
+    lowered to symbolic Stim feedback, so a DEM can be extracted (it is no
+    longer rejected)."""
 
     @cudaq.kernel
     def kernel():
@@ -272,7 +275,32 @@ def test_conditional_feedback_rejected():
         m1 = mz(q1)
         cudaq.detector(m0, m1)
 
-    with pytest.raises(RuntimeError, match=r"branches on a measurement"):
+    # `if (m0) x(q1)` folds into the Pauli frame, so the m0^m1 detector is
+    # deterministic and error analysis succeeds (no noise -> no error edges).
+    dem_text = cudaq.dem_from_kernel(kernel)
+    assert _summary(dem_text) == {"errors": 0, "detectors": 1, "observables": 0}
+
+
+def test_nonlinear_conditional_rejected():
+    """A non-linear (`and`) measurement condition has no symbolic-feedback
+    representation, so it is rejected rather than silently mis-analyzed."""
+
+    @cudaq.kernel
+    def kernel():
+        q0 = cudaq.qubit()
+        q1 = cudaq.qubit()
+        q2 = cudaq.qubit()
+        h(q0)
+        h(q1)
+        m0 = mz(q0)
+        m1 = mz(q1)
+        if m0 and m1:
+            x(q2)
+        m2 = mz(q2)
+        cudaq.detector(m0, m1, m2)
+
+    with pytest.raises(RuntimeError,
+                       match=r"cannot be represented as symbolic Pauli"):
         cudaq.dem_from_kernel(kernel)
 
 

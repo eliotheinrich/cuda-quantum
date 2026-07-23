@@ -23,12 +23,10 @@ _VALID_DEM_OPTION_KEYS = frozenset({
 
 
 def _detail_check_conditionals_on_measure(kernel):
-    if not _kernel_has_conditionals_on_measure(kernel):
-        return
-    kernel_name = kernel.name if hasattr(kernel, 'name') else '<unknown>'
-    raise RuntimeError(
-        f"`cudaq::dem_from_kernel`: kernel '{kernel_name}' branches on "
-        "a measurement result. DEM analysis not supported.")
+    # Measurement-conditioned Paulis (`if (m) P(q)`) are lowered to symbolic
+    # feedback (`qec.apply_pauli_feedback`) on the DEM path, so they are
+    # representable in the detector error model. No longer rejected here.
+    return
 
 
 @trace.traced

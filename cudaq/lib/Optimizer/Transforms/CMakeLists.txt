@@ -50,6 +50,7 @@ add_cudaq_library(OptTransforms
   LoopPeeling.cpp
   LoopUnroll.cpp
   LowerToCFG.cpp
+  LowerPauliFeedback.cpp
   LowerUnwind.cpp
   Mapping.cpp
   MemToReg.cpp
